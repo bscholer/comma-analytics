@@ -1,5 +1,6 @@
 """Decode one qlog segment into InfluxDB points."""
 import base64
+import datetime
 import json
 import re
 
@@ -7,9 +8,10 @@ import zstandard
 import capnp
 from influxdb_client import Point, WritePrecision
 
-from .config import ROOT
+from .config import ENV, ROOT
 from .engage import UNKNOWN_CAUSE, EngagementTracker, alert_cause
 from .faults import FaultTracker
+from .legacy import upgrade
 
 capnp.remove_import_hook()
 _log = capnp.load(str(ROOT / "schema" / "log.capnp"), imports=[str(ROOT / "schema")])
@@ -48,6 +50,9 @@ TRACK_MOVING = 5.0  # m/s
 ATTENTION = {"attentive": 0, "wheel touch": 1, "no face": 2, "distracted": 3,
              "distracted 1": 4, "unresponsive 1": 5, "distracted 2": 6, "unresponsive 2": 7, "distracted 3": 8, "unresponsive 3": 9}
 DM_LEVELS = {"none": 0, "one": 1, "two": 2, "three": 3}
+# road-camera snapshots are a third of the data written: drives before this date (YYYY-MM-DD, UTC) go without them
+THUMBNAILS_SINCE_NS = (int(datetime.datetime.fromisoformat(ENV["THUMBNAILS_SINCE"]).replace(tzinfo=datetime.UTC).timestamp()) * 10**9
+                       if ENV.get("THUMBNAILS_SINCE") else 0)
 FORWARD_GEARS = ("drive", "low", "sport", "manumatic", "brake", "eco")
 # which lateral controller openpilot is steering with (controlsState), 0 while it isn't steering
 LAT_CONTROLLERS = {"torqueState": 1, "angleState": 2, "pidState": 3, "curvatureState": 4, "debugState": 5}
@@ -77,7 +82,7 @@ def classify(lat: bool, lon: bool, acc: bool, mads_active: bool, op_enabled: boo
 
 def read_events(path):
   data = zstandard.ZstdDecompressor().stream_reader(open(path, "rb")).read()
-  return _log.Event.read_multiple_bytes(data)
+  return upgrade(_log.Event.read_multiple_bytes(data), _log)
 
 
 def extract_segment(path, tags: dict, fallback_start_ns: int | None) -> tuple[list[Point], dict, dict]:
@@ -275,7 +280,7 @@ def extract_segment(path, tags: dict, fallback_start_ns: int | None) -> tuple[li
       cur["rot_std"] = sum(x * x for x in m.cameraOdometry.rotStd) ** 0.5  # vision-motion uncertainty
     elif w == "narrowRoadCameraState":
       cur["exposure"] = m.narrowRoadCameraState.exposureValPercent
-    elif w == "thumbnail":
+    elif w == "thumbnail" and t + offset >= THUMBNAILS_SINCE_NS:
       # ~3.5 KB road-camera JPEG once a minute; base64 so a Grafana table can show it
       points.append(pt("thumbnail", t).field("jpeg", base64.b64encode(bytes(m.thumbnail.thumbnail)).decode()))
     elif w == "chestnutState":

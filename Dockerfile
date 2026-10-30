@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY schema/ schema/
 COPY ct/ ct/
-COPY sync.py setup_grafana.py ./
+COPY sync.py setup_grafana.py import_realdata.py ./
 ENV PYTHONUNBUFFERED=1 ARCHIVE_DIR=/app/archive
 USER app
 CMD ["python", "sync.py", "--daemon"]

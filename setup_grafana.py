@@ -1583,9 +1583,13 @@ def influx_setup() -> str:
   run; the Grafana data source is updated with the new one right after."""
   org = ENV["INFLUX_ORG"]
   with InfluxDBClient(url=ENV["INFLUX_URL"], token=secret("influx_token"), timeout=30_000) as client:
-    org_id = client.organizations_api().find_organizations(org=org)[0].id
     buckets = client.buckets_api()
     bucket = buckets.find_bucket_by_name(BUCKET)
+    # with the bucket made and INFLUX_READ_TOKEN given, a token scoped to the bucket is enough: the org (name or id)
+    # is only looked up to create things, which needs a broader token anyway
+    if bucket is not None and ENV.get("INFLUX_READ_TOKEN"):
+      return ENV["INFLUX_READ_TOKEN"]
+    org_id = bucket.org_id if bucket else client.organizations_api().find_organizations(org=org)[0].id
     if bucket is None:
       bucket = buckets.create_bucket(bucket_name=BUCKET, org_id=org_id)  # infinite retention
       print(f"created bucket {BUCKET} in org {org}")
