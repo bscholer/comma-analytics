@@ -108,7 +108,12 @@ def ingest_route(client, write, route: dict, segs: list[int], done: set[int], ch
     if seg in done:
       continue
     path = route_dir(route["fullname"]) / f"{seg}.qlog.zst"
-    points, summary, seg_info = extract_segment(path, tags, segment_start_ns(route, seg))
+    try:
+      points, summary, seg_info = extract_segment(path, tags, segment_start_ns(route, seg))
+    except Exception as e:  # a log no reader can make sense of: skip the segment, keep the drive
+      log(f"{route['fullname']} seg {seg}: decode failed, skipped: {e}")
+      done.add(seg)
+      continue
     if seg_info and any(info.get(k) != v for k, v in seg_info.items()):
       info = {**info, **seg_info}
       info_file.write_text(json.dumps(info, indent=1))
@@ -159,23 +164,32 @@ def ingest_device(write, state, changes) -> None:
   for route, segs in device.device_routes().items():
     name = f"{ENV['DONGLE_ID']}|{route}"
     new = [x for x in segs if x not in set(state["loaded"].get(name, []))]
-    if not new or route in state.setdefault("no_gps", []):
+    if not new or route in state.setdefault("no_gps", []) or route in state.setdefault("failed", []):
       continue
-    r = device.stage(route, segs)
-    if r is None:
-      state["no_gps"].append(route)  # never moved / no time fix: can't be placed on the timeline
+    try:
+      _ingest_device_route(write, state, changes, route, segs, name, new)
+    except Exception as e:  # one bad drive must not stop the rest; it isn't retried until removed from "failed"
+      state["failed"].append(route)
       save_state(state)
-      log(f"{name}: no GPS time fix in any segment, skipped")
-      continue
-    done = set(state["loaded"].get(name, []))
-    if r.get("source") == "device":
-      r["log_metres"] = r.get("log_metres", 0.0) if done else 0.0
-    n = ingest_route(None, write, r, segs, done, changes)
-    if r.get("source") == "device":
-      (route_dir(name) / "route.json").write_text(json.dumps(r, indent=1))
-    state["loaded"][name] = sorted(done)
+      log(f"{name}: ingest failed, skipped: {e}")
+
+
+def _ingest_device_route(write, state, changes, route, segs, name, new) -> None:
+  r = device.stage(route, segs)
+  if r is None:
+    state["no_gps"].append(route)  # never moved / no time fix: can't be placed on the timeline
     save_state(state)
-    log(f"{name}: {len(new)} segs from device, {n} points written")
+    log(f"{name}: no GPS time fix in any segment, skipped")
+    return
+  done = set(state["loaded"].get(name, []))
+  if r.get("source") == "device":
+    r["log_metres"] = r.get("log_metres", 0.0) if done else 0.0
+  n = ingest_route(None, write, r, segs, done, changes)
+  if r.get("source") == "device":
+    (route_dir(name) / "route.json").write_text(json.dumps(r, indent=1))
+  state["loaded"][name] = sorted(done)
+  save_state(state)
+  log(f"{name}: {len(new)} segs from device, {n} points written")
 
 
 def ingest_rlogs(write, state, changes, limit: int | None = 30) -> int:

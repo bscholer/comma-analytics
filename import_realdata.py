@@ -30,12 +30,29 @@ DATED = re.compile(r"(\d{4}-\d{2}-\d{2})--\d{2}-\d{2}-\d{2}--\d+$")
 SEGMENT = re.compile(r".+--\d+$")
 
 
+def _zst(p: Path) -> bytes:
+  out = bytearray()
+  try:
+    with zstandard.ZstdDecompressor().stream_reader(open(p, "rb")) as r:
+      while chunk := r.read(1 << 20):
+        out += chunk
+  except zstandard.ZstdError:  # truncated: keep what decompressed
+    pass
+  return bytes(out)
+
+
+def _bz2(p: Path) -> bytes:
+  # a decompressor object returns what it could decode from a truncated stream; bz2.decompress raises
+  return bz2.BZ2Decompressor().decompress(p.read_bytes())
+
+
 def qlog_bytes(seg: Path) -> bytes | None:
-  for name, read in (("qlog.zst", lambda p: zstandard.ZstdDecompressor().stream_reader(open(p, "rb")).read()),
-                     ("qlog", Path.read_bytes), ("qlog.bz2", lambda p: bz2.decompress(p.read_bytes()))):
+  """The segment's qlog, uncompressed. A file cut off mid-write (power lost) gives what was written before the cut;
+  ct.legacy keeps the whole messages in it."""
+  for name, read in (("qlog.zst", _zst), ("qlog", Path.read_bytes), ("qlog.bz2", _bz2)):
     p = seg / name
     if p.exists() and p.stat().st_size:
-      return read(p)
+      return read(p) or None
   return None
 
 
@@ -66,7 +83,11 @@ def main() -> int:
     if args.dry_run:
       staged += 1
       continue
-    data = qlog_bytes(seg)
+    try:
+      data = qlog_bytes(seg)
+    except Exception as e:  # unreadable file: one segment, not the whole import
+      print(f"{seg.name}: unreadable qlog, skipped: {e}", flush=True)
+      data = None
     if data is None:
       skipped += 1
       continue
@@ -77,7 +98,7 @@ def main() -> int:
     staged += 1
     if staged % 500 == 0:
       print(f"{dt.datetime.now():%H:%M:%S} staged {staged}", flush=True)
-  print(f"{len(segs)} segments in range, {staged} {'to stage' if args.dry_run else 'staged'}, {skipped} without a qlog",
+  print(f"{len(segs)} segments in range, {staged} {'to stage' if args.dry_run else 'staged'}, {skipped} without a readable qlog",
         flush=True)
   if args.dry_run:
     return 0
